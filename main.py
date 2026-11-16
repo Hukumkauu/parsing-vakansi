@@ -33,6 +33,8 @@ def make_report(storage, professions, out_dir, open_browser=False):
     vacancies = storage.vacancies_for_run(run["id"])
     if storage.excluded_count:
         print(f"Не учтено объявлений о военной службе по контракту: {storage.excluded_count}")
+    if storage.duplicate_count:
+        print(f"Не учтено повторов одного объявления в разных регионах: {storage.duplicate_count}")
     stats = market_stats(vacancies, professions, storage.totals_for_run(run["id"]))
     stamp = run["started_at"][:10]
     html_path = build_html(stats, storage.history(), run, os.path.join(out_dir, f"report_{stamp}.html"))
@@ -65,6 +67,20 @@ def print_stats(storage, professions):
               f"{round(s['junior_share'] * 100):>9}% {start_score(s):>6}")
 
 
+def check_profession(storage, name, junior=False, top=10):
+    run = storage.last_run()
+    if run is None:
+        print("В базе ещё нет данных. Сначала выполните: python main.py collect")
+        return
+    items = [v for v in storage.vacancies_for_run(run["id"])
+             if name.lower() in v["profession"].lower() and v["salary_rub"]
+             and (not junior or v["experience"] == "none")]
+    items.sort(key=lambda v: v["salary_rub"], reverse=True)
+    print(f"Найдено вакансий с зарплатой: {len(items)}. Самые дорогие:\n")
+    for v in items[:top]:
+        print(f"{round(v['salary_rub'] / 1000)} тыс. | {v['title'][:50]} | {v['employer'][:30]} | {v['region']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Мониторинг рынка труда для профориентации")
     parser.add_argument("--db", default="data/vacancies.db", help="файл базы данных")
@@ -85,6 +101,10 @@ def main():
     p_report = sub.add_parser("report", help="построить отчёт по последнему замеру")
     p_report.add_argument("--out", default="reports", help="папка для отчётов")
     p_report.add_argument("--open", action="store_true", help="открыть отчёт в браузере")
+
+    p_check = sub.add_parser("check", help="посмотреть самые дорогие вакансии профессии (после фильтров)")
+    p_check.add_argument("profession", help="название профессии или его часть")
+    p_check.add_argument("--junior", action="store_true", help="только без опыта")
 
     sub.add_parser("stats", help="сводка в консоли")
     sub.add_parser("list", help="список профессий")
@@ -115,6 +135,8 @@ def main():
             make_report(storage, professions, args.out)
     elif args.command == "report":
         make_report(storage, professions, args.out, args.open)
+    elif args.command == "check":
+        check_profession(storage, args.profession, args.junior)
     elif args.command == "stats":
         print_stats(storage, professions)
     return 0

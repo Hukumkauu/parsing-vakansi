@@ -69,6 +69,7 @@ class Storage:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.excluded_count = 0
+        self.duplicate_count = 0
 
     def start_run(self, region, sources):
         cur = self.conn.execute(
@@ -137,7 +138,7 @@ class Storage:
             result.append(d)
         if with_excluded:
             return result
-        kept, self.excluded_count = filters.apply(result)
+        kept, self.excluded_count, self.duplicate_count = filters.apply(result)
         return kept
 
     def totals_for_run(self, run_id):
