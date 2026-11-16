@@ -13,6 +13,7 @@ class BaseSource:
     title = "Базовый источник"
     delay = 0.3  # пауза между запросами, чтобы не получить бан
     last_total = 0  # сколько всего вакансий нашёл сайт по последнему запросу
+    last_status = 0  # код ответа последнего запроса
 
     def __init__(self, user_agent: str = "VacancyMonitor/1.0"):
         self.session = requests.Session()
@@ -31,13 +32,15 @@ class BaseSource:
                 log.warning("%s: ошибка сети (%s), попытка %d", self.name, exc, attempt)
                 time.sleep(2 * attempt)
                 continue
+            self.last_status = resp.status_code
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code in (429, 500, 502, 503, 504):
                 log.warning("%s: код %d, повтор через %d c", self.name, resp.status_code, 3 * attempt)
                 time.sleep(3 * attempt)
                 continue
-            log.error("%s: код %d для %s: %s", self.name, resp.status_code, resp.url, resp.text[:200])
+            if resp.status_code != 403:
+                log.error("%s: код %d для %s: %s", self.name, resp.status_code, resp.url, resp.text[:200])
             return None
         return None
 

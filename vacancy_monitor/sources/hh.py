@@ -1,4 +1,11 @@
-"""HeadHunter (hh.ru) через официальный открытый API: https://api.hh.ru"""
+"""HeadHunter (hh.ru) через официальный API: https://api.hh.ru
+
+hh.ru не отдаёт вакансии без ключа приложения (ошибка 403).
+Ключ получают бесплатно, зарегистрировав приложение на https://dev.hh.ru/admin
+Передать его можно одним из способов (переменные окружения):
+  HH_TOKEN                        - готовый токен приложения
+  HH_CLIENT_ID и HH_CLIENT_SECRET - программа сама получит токен
+"""
 import logging
 import os
 
@@ -9,6 +16,13 @@ from .base import BaseSource
 log = logging.getLogger(__name__)
 
 API = "https://api.hh.ru"
+TOKEN_URL = "https://hh.ru/oauth/token"
+
+NO_ACCESS_MESSAGE = (
+    "hh.ru отказал в доступе (код 403): для поиска вакансий нужен ключ приложения. "
+    "Зарегистрируйте приложение на https://dev.hh.ru/admin и задайте переменные "
+    "HH_CLIENT_ID и HH_CLIENT_SECRET (или HH_TOKEN). Пока hh пропускается."
+)
 
 EXPERIENCE = {
     "noExperience": "none",
@@ -36,21 +50,51 @@ class HHSource(BaseSource):
     def __init__(self, user_agent, details: int = 0):
         super().__init__(user_agent)
         self.session.headers["HH-User-Agent"] = user_agent
-        token = os.environ.get("HH_TOKEN")
+        token = os.environ.get("HH_TOKEN") or self._request_token()
         if token:
             self.session.headers["Authorization"] = f"Bearer {token}"
         self.details = details  # сколько вакансий догрузить подробно (ключевые навыки)
         self._rates = None
+        self.blocked = False  # hh отказал в доступе - больше не обращаемся
 
+    def _request_token(self):
+        client_id = os.environ.get("HH_CLIENT_ID")
+        client_secret = os.environ.get("HH_CLIENT_SECRET")
+        if not (client_id and client_secret):
+            return None
+        try:
+            resp = self.session.post(TOKEN_URL, data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            }, timeout=20)
+        except Exception as exc:
+            log.error("hh: не удалось получить токен: %s", exc)
+            return None
+        if resp.status_code != 200:
+            log.error("hh: токен не выдан (код %d): %s", resp.status_code, resp.text[:200])
+            return None
+        log.info("hh: токен приложения получен")
+        return resp.json().get("access_token")
+
+    def _check_blocked(self):
+        if self.last_status == 403 and not self.blocked:
+            self.blocked = True
+            log.error(NO_ACCESS_MESSAGE)
+        return self.blocked
     def currency_rates(self):
         if self._rates is None:
             data = self.get_json(f"{API}/dictionaries") or {}
+            self._check_blocked()
             self._rates = {c["code"]: c["rate"] for c in data.get("currency", []) if c.get("rate")}
             if not self._rates:
                 self._rates = {"RUR": 1.0}
         return self._rates
 
     def search(self, query, limit, region=None):
+        if self.blocked:
+            self.last_total = 0
+            return []
         area = AREAS.get((region or "россия").lower(), region or 113)
         per_page = min(100, limit)
         self.last_total = 0
@@ -66,6 +110,8 @@ class HHSource(BaseSource):
                 "order_by": "publication_time",
             }
             data = self.get_json(f"{API}/vacancies", params=params)
+            if data is None and self._check_blocked():
+                return []
             if not data or not data.get("items"):
                 break
             self.last_total = data.get("found", 0)
