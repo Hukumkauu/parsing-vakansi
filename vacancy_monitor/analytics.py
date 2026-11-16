@@ -6,6 +6,8 @@ from .models import EXPERIENCE_LEVELS
 
 # Отсекаем явные ошибки в зарплатах (например, 1 рубль или 100 млн)
 SALARY_MIN, SALARY_MAX = 10_000, 2_000_000
+# Меньше стольких зарплат - медиана ненадёжна и не показывается
+MIN_SAMPLE = 5
 
 
 def percentile(values, p):
@@ -20,9 +22,11 @@ def percentile(values, p):
 
 def salary_stats(values):
     values = [v for v in values if v and SALARY_MIN <= v <= SALARY_MAX]
+    if len(values) < MIN_SAMPLE:
+        return {"count": len(values), "median": None, "p25": None, "p75": None}
     return {
         "count": len(values),
-        "median": median(values) if values else None,
+        "median": median(values),
         "p25": percentile(values, 0.25),
         "p75": percentile(values, 0.75),
     }

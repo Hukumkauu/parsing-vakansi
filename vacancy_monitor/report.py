@@ -264,7 +264,8 @@ def build_html(stats, history, run, output):
 <h2>Все профессии</h2><div class="filters">{filters}</div>{_summary_table(stats, history)}
 <h2>Подробно по профессиям</h2><div class="cards">{''.join(_profession_card(s, history) for s in stats)}</div>
 <p class="note">Зарплаты пересчитаны в рубли, указаны «как в вакансии» (часть работодателей пишет до вычета
-налога). Явно ошибочные суммы (меньше 10 тыс. и больше 2 млн ₽) не учитываются. Сформировано
+налога). Явно ошибочные суммы (меньше 10 тыс. и больше 2 млн ₽) не учитываются. Если зарплата
+указана меньше чем в 5 вакансиях, вместо неё стоит «—», чтобы не вводить в заблуждение. Сформировано
 {datetime.now().strftime('%d.%m.%Y %H:%M')}.</p>
 </div><script>{JS}</script></body></html>"""
     folder = os.path.dirname(output)
