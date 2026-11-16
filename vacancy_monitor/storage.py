@@ -99,6 +99,10 @@ class Storage:
         )
         self.conn.commit()
 
+    def update_run_sources(self, run_id, sources):
+        self.conn.execute("UPDATE runs SET sources = ? WHERE id = ?", (",".join(sources), run_id))
+        self.conn.commit()
+
     def save_total(self, run_id, profession, source, found, collected):
         self.conn.execute(
             "INSERT OR REPLACE INTO market_totals VALUES (?, ?, ?, ?, ?)",

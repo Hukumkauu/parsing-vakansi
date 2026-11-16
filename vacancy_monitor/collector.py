@@ -21,6 +21,7 @@ def collect(storage, sources, professions, region, limit):
     run_id = storage.start_run(region, [s.name for s in sources])
     log.info("Замер №%d, регион: %s, источники: %s", run_id, region, ", ".join(s.title for s in sources))
 
+    worked = set()  # сайты, которые реально прислали вакансии
     for i, prof in enumerate(professions, 1):
         all_vac = []
         found_total = 0
@@ -35,9 +36,13 @@ def collect(storage, sources, professions, region, limit):
             storage.save_vacancies(run_id, items, prof["sphere"], rates)
             storage.save_total(run_id, prof["name"], src.name, src.last_total, len(items))
             found_total += src.last_total or len(items)
+            if items:
+                worked.add(src.name)
             all_vac.extend(items)
         log.info("[%d/%d] %s: собрано %d, всего на сайтах %d",
                  i, len(professions), prof["name"], len(all_vac), found_total)
+
+    storage.update_run_sources(run_id, [s.name for s in sources if s.name in worked])
 
     # Снимок показателей для отслеживания динамики
     vacancies = storage.vacancies_for_run(run_id)
