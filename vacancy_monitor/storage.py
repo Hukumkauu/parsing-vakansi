@@ -4,6 +4,8 @@ import os
 import sqlite3
 from datetime import datetime
 
+from . import filters
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +68,7 @@ class Storage:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self.excluded_count = 0
 
     def start_run(self, region, sources):
         cur = self.conn.execute(
@@ -124,14 +127,18 @@ class Storage:
     def runs(self):
         return self.conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
 
-    def vacancies_for_run(self, run_id):
+    def vacancies_for_run(self, run_id, with_excluded=False):
+        """Вакансии замера. По умолчанию без набора на военную службу (см. filters)."""
         rows = self.conn.execute("SELECT * FROM vacancies WHERE last_seen_run = ?", (run_id,)).fetchall()
         result = []
         for r in rows:
             d = dict(r)
             d["skills"] = json.loads(d["skills"] or "[]")
             result.append(d)
-        return result
+        if with_excluded:
+            return result
+        kept, self.excluded_count = filters.apply(result)
+        return kept
 
     def totals_for_run(self, run_id):
         rows = self.conn.execute(

@@ -31,6 +31,8 @@ def make_report(storage, professions, out_dir, open_browser=False):
         print("В базе ещё нет данных. Сначала выполните: python main.py collect")
         return None
     vacancies = storage.vacancies_for_run(run["id"])
+    if storage.excluded_count:
+        print(f"Не учтено объявлений о военной службе по контракту: {storage.excluded_count}")
     stats = market_stats(vacancies, professions, storage.totals_for_run(run["id"]))
     stamp = run["started_at"][:10]
     html_path = build_html(stats, storage.history(), run, os.path.join(out_dir, f"report_{stamp}.html"))
