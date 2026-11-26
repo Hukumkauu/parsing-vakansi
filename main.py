@@ -1,145 +1,143 @@
-"""Мониторинг рынка труда для профориентации.
+"""Мониторинг уровня заработных плат.
 
-Примеры запуска:
-    python main.py collect                         # собрать вакансии по всем профессиям (вся Россия)
-    python main.py collect --region москва --limit 300
-    python main.py collect --sphere IT --sphere "Информационная безопасность"
-    python main.py collect --sources hh trudvsem --hh-details 30
-    python main.py report                          # сделать HTML-отчёт по последнему замеру
-    python main.py stats                           # краткая сводка в консоли
-    python main.py list                            # список профессий в каталоге
+    python main.py init              создать Excel-файл с настройками
+    python main.py run               собрать данные и обновить отчёт в Excel
+    python main.py run --open        то же и открыть файл
+    python main.py schedule          запускать мониторинг автоматически (Windows)
+    python main.py unschedule        отключить автоматический запуск
 """
 import argparse
+import datetime
 import logging
 import os
+import subprocess
 import sys
-import webbrowser
 
-from vacancy_monitor.analytics import market_stats, start_score
-from vacancy_monitor.collector import collect
-from vacancy_monitor.professions import load_professions, select_professions
-from vacancy_monitor.report import build_html, export_csv, export_json
+from vacancy_monitor import pipeline
 from vacancy_monitor.sources import SOURCES, build_sources
 from vacancy_monitor.storage import Storage
+from vacancy_monitor.workbook import WorkbookLocked, create_template, read_config, write_report
 
-USER_AGENT = os.environ.get("VACANCY_USER_AGENT", "CareerMarketMonitor/1.0 (student project)")
-
-
-def make_report(storage, professions, out_dir, open_browser=False):
-    run = storage.last_run()
-    if run is None:
-        print("В базе ещё нет данных. Сначала выполните: python main.py collect")
-        return None
-    vacancies = storage.vacancies_for_run(run["id"])
-    if storage.excluded_count:
-        print(f"Не учтено объявлений о военной службе по контракту: {storage.excluded_count}")
-    if storage.duplicate_count:
-        print(f"Не учтено повторов одного объявления в разных регионах: {storage.duplicate_count}")
-    stats = market_stats(vacancies, professions, storage.totals_for_run(run["id"]))
-    stamp = run["started_at"][:10]
-    html_path = build_html(stats, storage.history(), run, os.path.join(out_dir, f"report_{stamp}.html"))
-    csv_path = export_csv(vacancies, os.path.join(out_dir, f"vacancies_{stamp}.csv"))
-    json_path = export_json(stats, os.path.join(out_dir, f"stats_{stamp}.json"))
-    print(f"Отчёт:      {os.path.abspath(html_path)}")
-    print(f"Вакансии:   {os.path.abspath(csv_path)}")
-    print(f"Показатели: {os.path.abspath(json_path)}")
-    if open_browser:
-        webbrowser.open("file://" + os.path.abspath(html_path))
-    return html_path
+DEFAULT_FILE = "Мониторинг зарплат.xlsx"
+TASK_NAME = "Мониторинг зарплат"
+USER_AGENT = os.environ.get("VACANCY_USER_AGENT", "SalaryMonitor/1.0")
 
 
-def print_stats(storage, professions):
-    run = storage.last_run()
-    if run is None:
-        print("В базе ещё нет данных. Сначала выполните: python main.py collect")
-        return
-    vacancies = storage.vacancies_for_run(run["id"])
-    stats = market_stats(vacancies, professions, storage.totals_for_run(run["id"]))
-    stats.sort(key=lambda s: s["salary"]["median"] or 0, reverse=True)
-    print(f"Замер от {run['started_at']}, регион: {run['region']}\n")
-    head = f"{'Профессия':42} {'Вакансий':>9} {'Медиана':>10} {'Без опыта':>10} {'Старт':>6}"
-    print(head)
-    print("-" * len(head))
-    for s in stats:
-        med = s["salary"]["median"]
-        med = f"{round(med / 1000)} тыс." if med else "—"
-        print(f"{s['profession'][:42]:42} {s['found']:>9} {med:>10} "
-              f"{round(s['junior_share'] * 100):>9}% {start_score(s):>6}")
+def cmd_init(args):
+    if os.path.exists(args.file) and not args.force:
+        print(f"Файл уже есть: {os.path.abspath(args.file)}")
+        print("Чтобы создать заново (настройки будут потеряны), добавьте --force")
+        return 1
+    create_template(args.file)
+    print(f"Создан файл: {os.path.abspath(args.file)}")
+    print("Заполните вкладки «Настройки мониторинга» и «Наша зп», затем выполните: python main.py run")
+    return 0
 
 
-def check_profession(storage, name, junior=False, top=10):
-    run = storage.last_run()
-    if run is None:
-        print("В базе ещё нет данных. Сначала выполните: python main.py collect")
-        return
-    items = [v for v in storage.vacancies_for_run(run["id"])
-             if name.lower() in v["profession"].lower() and v["salary_rub"]
-             and (not junior or v["experience"] == "none")]
-    items.sort(key=lambda v: v["salary_rub"], reverse=True)
-    print(f"Найдено вакансий с зарплатой: {len(items)}. Самые дорогие:\n")
-    for v in items[:top]:
-        print(f"{round(v['salary_rub'] / 1000)} тыс. | {v['title'][:50]} | {v['employer'][:30]} | {v['region']}")
+def cmd_run(args):
+    if not os.path.exists(args.file):
+        print(f"Нет файла {args.file}. Сначала выполните: python main.py init")
+        return 1
+    config = read_config(args.file)
+    targets, params = config["targets"], config["params"]
+    if not targets:
+        print("В «Настройках мониторинга» нет ни одной включённой должности")
+        return 1
+    unknown = [s for s in params["sources"] if s not in SOURCES]
+    if unknown:
+        print(f"Неизвестные источники: {', '.join(unknown)}. Доступны: {', '.join(SOURCES)}")
+        return 1
+    sources = [s for s in build_sources(params["sources"], USER_AGENT) if s.is_available()]
+    skipped = set(params["sources"]) - {s.name for s in sources}
+    if skipped:
+        print(f"Пропущены (нет ключа API): {', '.join(sorted(skipped))}")
+    if not sources:
+        print("Нет доступных источников")
+        return 1
+
+    print(f"Должностей и локаций: {len(targets)}, источники: {', '.join(s.title for s in sources)}")
+    raw, worked = pipeline.collect(targets, sources, params["limit"])
+    result = pipeline.process(raw, targets, config["dictionary"], config["our_pay"], params["min_sample"])
+    result["sources"] = [pipeline.SOURCE_TITLES.get(s, s) for s in worked]
+
+    storage = Storage(args.db)
+    storage.save_run(result["date"], worked, result["stats"])
+    history = storage.history()
+    for h in history:
+        h["date"] = datetime.date.fromisoformat(h["date"])
+
+    try:
+        write_report(args.file, result, history, result["new_synonyms"])
+    except WorkbookLocked as exc:
+        print(exc)
+        return 1
+
+    d = result["dropped_detail"]
+    print(f"\nСобрано вакансий: {len(raw)}")
+    print(f"В расчёте: {len(result['used'])}, в «Прочее»: {len(result['other'])}")
+    print(f"Отсеяно: повторы {d['повтор']}, военная служба {d['военная служба']}, "
+          f"ошибки в зарплате {d['ошибка в зарплате']}, выбросы {d['выброс']}, без зарплаты {d['без зарплаты']}")
+    if result["new_synonyms"]:
+        print(f"В словарь добавлено новых названий для проверки: {len(result['new_synonyms'])}")
+    print(f"\nОтчёт обновлён: {os.path.abspath(args.file)}")
+    if args.open and sys.platform == "win32":
+        os.startfile(os.path.abspath(args.file))
+    return 0
+
+
+def cmd_schedule(args):
+    if sys.platform != "win32":
+        print("Автоматический запуск настраивается только в Windows")
+        return 1
+    period = str(read_config(args.file)["params"]["period"]).lower() if os.path.exists(args.file) else ""
+    folder = os.path.dirname(os.path.abspath(__file__))
+    command = f'cmd /c cd /d "{folder}" && "{sys.executable}" main.py run --file "{os.path.abspath(args.file)}"'
+    if period.startswith("ежемес"):
+        when = ["/SC", "MONTHLY", "/D", "1"]
+        text = "каждое 1-е число месяца"
+    else:
+        when = ["/SC", "WEEKLY", "/D", "MON"]
+        text = "каждый понедельник"
+    cmd = ["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/TR", command, *when, "/ST", args.time]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(res.stdout or res.stderr)
+        return 1
+    print(f"Готово: мониторинг будет запускаться {text} в {args.time} (компьютер должен быть включён)")
+    print("Изменить периодичность: поле «Периодичность» в настройках, затем снова python main.py schedule")
+    return 0
+
+
+def cmd_unschedule(args):
+    res = subprocess.run(["schtasks", "/Delete", "/F", "/TN", TASK_NAME], capture_output=True, text=True)
+    print("Автоматический запуск отключён" if res.returncode == 0 else (res.stdout or res.stderr))
+    return res.returncode
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Мониторинг рынка труда для профориентации")
-    parser.add_argument("--db", default="data/vacancies.db", help="файл базы данных")
-    parser.add_argument("--professions", default="professions.json", help="свой каталог профессий (JSON)")
+    parser = argparse.ArgumentParser(description="Мониторинг уровня заработных плат")
+    parser.add_argument("--file", default=DEFAULT_FILE, help="Excel-файл мониторинга")
+    parser.add_argument("--db", default="data/history.db", help="база истории замеров")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_collect = sub.add_parser("collect", help="собрать вакансии")
-    p_collect.add_argument("--region", default="россия", help="регион или город (по умолчанию вся Россия)")
-    p_collect.add_argument("--limit", type=int, default=200, help="сколько вакансий брать с каждого сайта на профессию")
-    p_collect.add_argument("--sources", nargs="+", default=["hh", "trudvsem", "superjob"], choices=list(SOURCES))
-    p_collect.add_argument("--profession", action="append", help="только эта профессия (можно часть названия)")
-    p_collect.add_argument("--sphere", action="append", help="только эта сфера")
-    p_collect.add_argument("--hh-details", type=int, default=20,
-                           help="сколько вакансий hh догрузить подробно для точных навыков")
-    p_collect.add_argument("--no-report", action="store_true", help="не строить отчёт после сбора")
-    p_collect.add_argument("--out", default="reports", help="папка для отчётов")
+    p = sub.add_parser("init", help="создать Excel-файл с настройками")
+    p.add_argument("--force", action="store_true", help="перезаписать существующий файл")
+    p = sub.add_parser("run", help="собрать данные и обновить отчёт")
+    p.add_argument("--open", action="store_true", help="открыть файл после обновления")
+    p = sub.add_parser("schedule", help="автоматический запуск по расписанию (Windows)")
+    p.add_argument("--time", default="09:00", help="время запуска, по умолчанию 09:00")
+    sub.add_parser("unschedule", help="отключить автоматический запуск")
 
-    p_report = sub.add_parser("report", help="построить отчёт по последнему замеру")
-    p_report.add_argument("--out", default="reports", help="папка для отчётов")
-    p_report.add_argument("--open", action="store_true", help="открыть отчёт в браузере")
-
-    p_check = sub.add_parser("check", help="посмотреть самые дорогие вакансии профессии (после фильтров)")
-    p_check.add_argument("profession", help="название профессии или его часть")
-    p_check.add_argument("--junior", action="store_true", help="только без опыта")
-
-    sub.add_parser("stats", help="сводка в консоли")
-    sub.add_parser("list", help="список профессий")
+    # --file и --db можно писать и после команды
+    for action in list(parser._actions):
+        if action.dest in ("file", "db"):
+            for subparser in sub.choices.values():
+                subparser.add_argument(f"--{action.dest}", default=argparse.SUPPRESS, help=action.help)
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
-
-    professions = load_professions(args.professions)
-
-    if args.command == "list":
-        for p in professions:
-            print(f"{p['sphere']:30} {p['name']:45} запрос: {p['query']}")
-        return 0
-
-    storage = Storage(args.db)
-
-    if args.command == "collect":
-        chosen = select_professions(professions, args.profession, args.sphere)
-        if not chosen:
-            print("Не найдено ни одной профессии по фильтру. Посмотрите список: python main.py list")
-            return 1
-        sources = build_sources(args.sources, USER_AGENT, args.hh_details)
-        skipped = [s.title for s in sources if not s.is_available()]
-        if skipped:
-            print(f"Пропущены (нет ключа API): {', '.join(skipped)}")
-        collect(storage, sources, chosen, args.region, args.limit)
-        if not args.no_report:
-            make_report(storage, professions, args.out)
-    elif args.command == "report":
-        make_report(storage, professions, args.out, args.open)
-    elif args.command == "check":
-        check_profession(storage, args.profession, args.junior)
-    elif args.command == "stats":
-        print_stats(storage, professions)
-    return 0
+    handlers = {"init": cmd_init, "run": cmd_run, "schedule": cmd_schedule, "unschedule": cmd_unschedule}
+    return handlers[args.command](args)
 
 
 if __name__ == "__main__":
