@@ -154,6 +154,10 @@ def interactive():
 
 
 def main():
+    # Русские буквы не должны ломать вывод в файл или в Планировщике Windows
+    for stream in (sys.stdout, sys.stderr):
+        if stream and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Мониторинг уровня заработных плат")
     parser.add_argument("--file", default=DEFAULT_FILE, help="Excel-файл мониторинга")
     parser.add_argument("--db", default="data/history.db", help="база истории замеров")
