@@ -5,6 +5,7 @@
     python main.py run --open        то же и открыть файл
     python main.py schedule          запускать мониторинг автоматически (Windows)
     python main.py unschedule        отключить автоматический запуск
+    python main.py                   всё сразу: создать файл, если его нет, собрать данные, открыть отчёт
 """
 import argparse
 import datetime
@@ -20,6 +21,8 @@ from vacancy_monitor.workbook import WorkbookLocked, create_template, read_confi
 
 DEFAULT_FILE = "Мониторинг зарплат.xlsx"
 TASK_NAME = "Мониторинг зарплат"
+FROZEN = getattr(sys, "frozen", False)  # запущено как .exe
+APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 USER_AGENT = os.environ.get("VACANCY_USER_AGENT", "SalaryMonitor/1.0")
 
 
@@ -90,8 +93,8 @@ def cmd_schedule(args):
         print("Автоматический запуск настраивается только в Windows")
         return 1
     period = str(read_config(args.file)["params"]["period"]).lower() if os.path.exists(args.file) else ""
-    folder = os.path.dirname(os.path.abspath(__file__))
-    command = f'cmd /c cd /d "{folder}" && "{sys.executable}" main.py run --file "{os.path.abspath(args.file)}"'
+    target = f'"{sys.executable}"' if FROZEN else f'"{sys.executable}" main.py'
+    command = f'cmd /c cd /d "{APP_DIR}" && {target} run --file "{os.path.abspath(args.file)}"'
     if period.startswith("ежемес"):
         when = ["/SC", "MONTHLY", "/D", "1"]
         text = "каждое 1-е число месяца"
@@ -114,6 +117,42 @@ def cmd_unschedule(args):
     return res.returncode
 
 
+def ask_superjob_key():
+    print("Ключ SuperJob не найден. Без него вакансии берутся только с «Работы России».")
+    print("Бесплатный ключ: https://api.superjob.ru/register (поле Secret key)")
+    key = input("Вставьте ключ правой кнопкой мыши и нажмите Enter (или просто Enter, чтобы пропустить): ").strip()
+    if key:
+        os.environ["SUPERJOB_KEY"] = key
+        if sys.platform == "win32":
+            subprocess.run(["setx", "SUPERJOB_KEY", key], capture_output=True)
+        print("Ключ сохранён.")
+    print()
+
+
+def interactive():
+    """Запуск двойным щелчком: всё делается само, в конце открывается отчёт."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    print("=" * 44)
+    print("  Мониторинг уровня заработных плат")
+    print("=" * 44, "\n")
+    if not os.environ.get("SUPERJOB_KEY"):
+        ask_superjob_key()
+    args = argparse.Namespace(file=DEFAULT_FILE, db="data/history.db", force=False, open=True)
+    if not os.path.exists(args.file):
+        cmd_init(args)
+        print()
+    print("Сбор данных и расчёт, это займёт несколько минут.")
+    print(f"Если файл «{DEFAULT_FILE}» открыт в Excel - закройте его.\n")
+    try:
+        code = cmd_run(args)
+    except Exception as exc:  # чтобы окно не закрылось без объяснения
+        print(f"\nОшибка: {exc}")
+        code = 1
+    print("\nГотово, отчёт открыт в Excel." if code == 0 else "\nОтчёт не обновлён, причина написана выше.")
+    input("Нажмите Enter, чтобы закрыть окно...")
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser(description="Мониторинг уровня заработных плат")
     parser.add_argument("--file", default=DEFAULT_FILE, help="Excel-файл мониторинга")
@@ -134,6 +173,10 @@ def main():
             for subparser in sub.choices.values():
                 subparser.add_argument(f"--{action.dest}", default=argparse.SUPPRESS, help=action.help)
 
+    if FROZEN:
+        os.chdir(APP_DIR)  # файлы отчёта и истории лежат рядом с .exe
+    if len(sys.argv) == 1:
+        return interactive()
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     handlers = {"init": cmd_init, "run": cmd_run, "schedule": cmd_schedule, "unschedule": cmd_unschedule}
