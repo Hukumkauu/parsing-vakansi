@@ -1,6 +1,7 @@
 """Цепочка мониторинга: собрать данные → убрать дубли и ошибки → привести
 должности к единому виду → посчитать показатели → сравнить с вилками банка."""
 import logging
+from collections import Counter
 from dataclasses import asdict
 from datetime import date
 from statistics import median
@@ -20,6 +21,10 @@ SOURCE_TITLES = {"hh": "HeadHunter", "trudvsem": "Работа России", "s
 SALARY_MIN, SALARY_MAX = 10_000, 2_000_000
 # Запасные курсы (сколько единиц валюты за 1 рубль), если hh недоступен
 FALLBACK_RATES = {"RUR": 1.0, "RUB": 1.0, "USD": 0.0125, "EUR": 0.0108, "KZT": 6.2}
+
+# Массовые однотипные объявления: не меньше 20 штук, больше половины выборки,
+# медиана отличается от остальных вакансий той же должности больше чем на 40%
+MASS_MIN, MASS_SHARE, MASS_GAP = 20, 0.5, 0.4
 
 ALL_RUSSIA = {"", "россия", "вся россия", "рф"}
 
@@ -81,7 +86,8 @@ def process(raw, targets, dictionary, our_pay, min_sample):
     normalizer = Normalizer([t["position"] for t in targets], dictionary)
     tracked = {(t["position"], t["location"]) for t in targets}
     dashboard = {(t["position"], t["location"]) for t in targets if t["dashboard"]}
-    dropped = {"военная служба": 0, "повтор": 0, "ошибка в зарплате": 0, "выброс": 0, "без зарплаты": 0}
+    dropped = {"военная служба": 0, "повтор": 0, "массовые объявления": 0, "ошибка в зарплате": 0,
+               "выброс": 0, "без зарплаты": 0}
     used, other, seen = [], [], set()
 
     for v in raw:
@@ -130,6 +136,29 @@ def process(raw, targets, dictionary, our_pay, min_sample):
     groups = {}
     for v in unique:
         groups.setdefault((v["position"], v["target_location"]), []).append(v)
+
+    # Массовые однотипные объявления: одно и то же название от множества разных фирм,
+    # которое составляет большую часть выборки и платит заметно иначе, чем остальные
+    # вакансии той же должности (обычно формальные вакансии). Считаются одной вакансией.
+    for key, items in groups.items():
+        titles = Counter(clean(v["title"]) for v in items)
+        title, count = titles.most_common(1)[0]
+        if count < MASS_MIN or count / len(items) < MASS_SHARE:
+            continue
+        cluster = [v for v in items if clean(v["title"]) == title]
+        rest = [v for v in items if clean(v["title"]) != title]
+        if not rest:
+            continue
+        m_cluster = median(v["salary_rub"] for v in cluster)
+        m_rest = median(v["salary_rub"] for v in rest)
+        if abs(m_cluster - m_rest) / m_rest < MASS_GAP:
+            continue
+        cluster.sort(key=lambda v: v["salary_rub"])
+        representative = cluster[len(cluster) // 2]
+        dropped["массовые объявления"] += len(cluster) - 1
+        log.info("%s, %s: %d однотипных объявлений «%s» посчитаны как одно",
+                 key[0], key[1], len(cluster), representative["title"])
+        groups[key] = rest + [representative]
 
     # Выбросы: зарплаты дальше трёх межквартильных размахов от середины
     used = []
