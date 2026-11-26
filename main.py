@@ -33,7 +33,8 @@ def cmd_init(args):
         return 1
     create_template(args.file)
     print(f"Создан файл: {os.path.abspath(args.file)}")
-    print("Заполните вкладки «Настройки мониторинга» и «Наша зп», затем выполните: python main.py run")
+    again = "запустите программу снова" if FROZEN else "выполните: python main.py run"
+    print(f"Должности, локации и вилки банка можно поменять во вкладках «Настройки мониторинга» и «Наша зп», затем {again}")
     return 0
 
 
