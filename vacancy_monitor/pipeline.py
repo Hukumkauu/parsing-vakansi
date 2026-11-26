@@ -7,7 +7,7 @@ from statistics import median
 
 from . import filters
 from .models import EXPERIENCE_LEVELS
-from .normalize import SKIPPED, Normalizer, clean
+from .normalize import Normalizer, clean
 from .sources import HHSource
 from .sources.trudvsem import CITY_TO_REGION
 from .workbook import compare
@@ -55,12 +55,14 @@ def collect(targets, sources, limit):
     raw, worked = [], set()
     for i, target in enumerate(targets, 1):
         got = 0
+        queries = [q.strip() for q in target["query"].split(";") if q.strip()] or [target["position"]]
         for src in sources:
-            try:
-                items = src.search(target["query"], limit, target["location"])
-            except Exception as exc:  # один сайт упал - продолжаем с другими
-                log.error("%s / %s: %s", src.title, target["position"], exc)
-                continue
+            items = []
+            for query in queries:
+                try:
+                    items += src.search(query, limit, target["location"])
+                except Exception as exc:  # один сайт упал - продолжаем с другими
+                    log.error("%s / %s: %s", src.title, query, exc)
             for v in items:
                 d = asdict(v)
                 d["salary_rub"] = v.salary_rub(rates)
@@ -94,7 +96,7 @@ def process(raw, targets, dictionary, our_pay, min_sample):
         position, method, _score = normalizer.normalize(v["title"])
         v["experience"] = EXPERIENCE_LEVELS.get(v["experience"], v["experience"])
         if position is None:
-            v["reason"] = "исключено словарём" if method == SKIPPED else "не совпало с должностями из настроек"
+            v["reason"] = method or "не совпало с должностями из настроек"
             other.append(v)
             continue
         if (position, v["target_location"]) not in tracked:
